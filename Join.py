@@ -1,3 +1,5 @@
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest
 from telethon import events
 from asyncio import sleep
 from .. import loader, utils
