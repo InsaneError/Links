@@ -1,13 +1,8 @@
 from telethon import events
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
-from telethon.tl.types import InputChannel, InputPeerChannel
 from asyncio import sleep
 from .. import loader, utils
-import re
-import logging
-
-logger = logging.getLogger(__name__)
 
 @loader.tds
 class ChatJoinMod(loader.Module):
@@ -16,68 +11,59 @@ class ChatJoinMod(loader.Module):
     
     async def client_ready(self, client, db):
         self.client = client
-        self.db = db
     
     @loader.command()
     async def join(self, message):
         """<ссылка> - Вступить в чат/канал по ссылке"""
         args = utils.get_args_raw(message)
         if not args:
-            await utils.answer(message, "Укажите ссылку на чат/канал")
+            await utils.answer(message, "❌ Укажите ссылку")
             return
         
         try:
             url = args.strip()
             
-            # Обработка разных форматов ссылок
+            # Если это юзернейм с @
             if url.startswith('@'):
-                username = url[1:]
-            elif 't.me/' in url:
-                username = url.split('t.me/')[-1].split('/')[0].split('?')[0]
-            else:
-                username = url
-            
-            # Убираем + для приватных инвайтов
-            if username.startswith('+'):
-                username = username[1:]
-            
-            # Пробуем разные методы вступления
-            try:
-                # Сначала пробуем как публичный канал/чат
-                entity = await self.client.get_entity(username)
-                
-                if hasattr(entity, 'broadcast') or hasattr(entity, 'megagroup'):
-                    # Это канал или супергруппа
-                    await self.client(JoinChannelRequest(entity))
-                else:
-                    # Это обычный чат или что-то еще
-                    await self.client(JoinChannelRequest(entity))
-                
+                entity = await self.client.get_entity(url)
+                await self.client(JoinChannelRequest(entity))
                 await message.delete()
                 return
+            
+            # Если это ссылка t.me
+            if 't.me/' in url:
+                # Извлекаем часть после t.me/
+                part = url.split('t.me/')[1].split('?')[0].split('/')[0]
                 
-            except ValueError as e:
-                # Если не найден как entity, пробуем как приватный инвайт
-                if "Cannot find any entity" in str(e) or "No user has" in str(e):
-                    try:
-                        # Пробуем как приватный инвайт
-                        await self.client(ImportChatInviteRequest(hash=username))
-                        await message.delete()
-                        return
-                    except Exception as invite_e:
-                        logger.error(f"Private invite error: {invite_e}")
-                        raise invite_e
+                # Если это приватный инвайт (начинается с + или длинный хеш)
+                if part.startswith('+') or len(part) > 20:
+                    hash_part = part[1:] if part.startswith('+') else part
+                    await self.client(ImportChatInviteRequest(hash=hash_part))
+                    await message.delete()
+                    return
                 else:
-                    raise e
-                    
+                    # Публичный чат/канал
+                    entity = await self.client.get_entity(part)
+                    await self.client(JoinChannelRequest(entity))
+                    await message.delete()
+                    return
+            
+            # Если это просто текст (пробуем как юзернейм)
+            try:
+                entity = await self.client.get_entity(url)
+                await self.client(JoinChannelRequest(entity))
+                await message.delete()
+                return
+            except:
+                pass
+            
+            await utils.answer(message, "❌ Неверная ссылка")
+            
         except Exception as e:
-            logger.error(f"Join error: {e}")
-            error_msg = str(e)
-            if "username is not registered" in error_msg.lower():
-                await utils.answer(message, "Пользователь/чат не найден")
-            elif "invite hash" in error_msg.lower():
-                await utils.answer(message, "Неверная инвайт-ссылка")
-            elif "already" in error_msg.lower():
-                await message.delete()  # Уже состоим, просто удаляем сообщение
+            error = str(e)
+            if "already" in error.lower():
+                await message.delete()  # Уже в чате - тихо удаляем
+            elif "USERNAME_NOT_OCCUPIED" in error or "не найден" in error.lower():
+                await utils.answer(message, "❌ Чат не найден")
             else:
-                await utils.answer(message, f"Ошибка: {error_msg[:100]}")
+                await utils.answer(message, f"❌ {error[:50]}")
