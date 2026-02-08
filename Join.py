@@ -1,9 +1,9 @@
 from telethon import events
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
+from telethon.tl.types import Channel, ChatInviteAlready
 from asyncio import sleep
 from .. import loader, utils
-import re
 
 @loader.tds
 class ChatJoinMod(loader.Module):
@@ -22,58 +22,92 @@ class ChatJoinMod(loader.Module):
             await utils.answer(message, "❌ Укажите ссылку")
             return
         
+        url = args.strip()
+        
         try:
-            url = args.strip()
-            
-            # 1. Определяем тип ссылки
-            is_private_invite = False
-            invite_hash = None
-            channel_username = None
-            
-            # Проверяем, это публичная ссылка или приватный инвайт
-            if 't.me/joinchat/' in url or 't.me/+' in url or 't.me/' in url and len(url.split('t.me/')[-1].split('/')[0]) > 20:
-                is_private_invite = True
-                # Извлекаем хэш из ссылки
-                if 't.me/joinchat/' in url:
-                    invite_hash = url.split('t.me/joinchat/')[-1].split('/')[0]
-                elif 't.me/+' in url:
-                    invite_hash = url.split('t.me/+')[-1].split('/')[0]
-                elif 't.me/' in url:
-                    invite_hash = url.split('t.me/')[-1].split('/')[0]
-            else:
-                # Публичная ссылка
-                if url.startswith('@'):
-                    channel_username = url[1:]
-                elif 't.me/' in url:
-                    channel_username = url.split('t.me/')[-1].split('/')[0].split('?')[0]
-                else:
-                    channel_username = url
-            
-            # 2. Используем правильный метод в зависимости от типа
-            if is_private_invite and invite_hash:
-                # Для приватных чатов используем ImportChatInviteRequest[citation:1][citation:7]
-                await self.client(ImportChatInviteRequest(hash=invite_hash))
-            elif channel_username:
-                # Для публичных каналов используем JoinChannelRequest[citation:6][citation:7]
-                entity = await self.client.get_entity(channel_username)
-                await self.client(JoinChannelRequest(channel=entity))
-            else:
-                await utils.answer(message, "❌ Не удалось распознать ссылку")
+            # 1. Если это юзернейм с @ - всегда публичный канал
+            if url.startswith('@'):
+                entity = await self.client.get_entity(url)
+                await self.client(JoinChannelRequest(entity))
+                await message.delete()
                 return
             
-            # Успешно - удаляем команду
-            await message.delete()
+            # 2. Обработка ссылок t.me
+            if 't.me/' in url:
+                # Получаем часть после t.me/
+                url_part = url.split('t.me/')[1]
+                # Берем первый сегмент (до слеша или до ?)
+                identifier = url_part.split('/')[0].split('?')[0]
+                
+                # Определяем тип ссылки
+                # Приватные инвайты: t.me/+ABC123 или t.me/joinchat/ABC123
+                # Длинные хэши (>15 символов) - тоже приватные
+                is_private = False
+                
+                if identifier.startswith('+'):
+                    # Формат t.me/+ABC123
+                    is_private = True
+                    invite_hash = identifier[1:]
+                elif url_part.startswith('joinchat/'):
+                    # Формат t.me/joinchat/ABC123
+                    is_private = True
+                    invite_hash = url_part.split('joinchat/')[1].split('/')[0].split('?')[0]
+                elif len(identifier) > 15:
+                    # Длинный хэш - скорее всего приватный
+                    is_private = True
+                    invite_hash = identifier
+                else:
+                    # Короткий идентификатор - публичный канал
+                    is_private = False
+                    channel_id = identifier
+            
+                if is_private:
+                    # Вступление в приватный чат
+                    try:
+                        result = await self.client(ImportChatInviteRequest(hash=invite_hash))
+                        await message.delete()
+                        return
+                    except Exception as e:
+                        error_str = str(e)
+                        if "already" in error_str.lower():
+                            await message.delete()  # Уже в чате
+                            return
+                        elif "hash" in error_str.lower():
+                            await utils.answer(message, "❌ Неверный или устаревший инвайт")
+                            return
+                        else:
+                            raise e
+                else:
+                    # Вступление в публичный канал
+                    try:
+                        entity = await self.client.get_entity(channel_id)
+                        await self.client(JoinChannelRequest(channel=entity))
+                        await message.delete()
+                        return
+                    except Exception as e:
+                        error_str = str(e)
+                        if "already" in error_str.lower():
+                            await message.delete()  # Уже в канале
+                            return
+                        else:
+                            raise e
+            
+            # 3. Если не распознали формат
+            await utils.answer(message, "❌ Неверный формат ссылки. Используйте:\n@username\nhttps://t.me/channel\nt.me/+invite_hash")
             
         except Exception as e:
             error_msg = str(e)
-            # Обрабатываем распространённые ошибки
-            if "already a participant" in error_msg.lower() or "Уже состою" in error_msg.lower():
-                await message.delete()  # Тишина, если уже в чате
-            elif "too many" in error_msg.lower():
-                await utils.answer(message, "❌ Превышен лимит вступлений в чаты")
-            elif "hash is invalid" in error_msg.lower():
-                await utils.answer(message, "❌ Неверная или устаревшая инвайт-ссылка")
-            elif "private" in error_msg.lower():
-                await utils.answer(message, "❌ Это приватный канал, нужна инвайт-ссылка")
+            
+            # Обработка частых ошибок
+            if "USERNAME_NOT_OCCUPIED" in error_msg or "No user has" in error_msg:
+                await utils.answer(message, "❌ Канал/пользователь не найден")
+            elif "CHANNEL_PRIVATE" in error_msg:
+                await utils.answer(message, "❌ Канал приватный, нужна инвайт-ссылка")
+            elif "FLOOD_WAIT" in error_msg:
+                await utils.answer(message, "⏳ Слишком много запросов, подождите")
+            elif "already" in error_msg.lower():
+                await message.delete()  # Тихий выход если уже в чате
             else:
-                await utils.answer(message, f"❌ Ошибка: {error_msg[:80]}")
+                # Выводим чистую ошибку для отладки
+                clean_error = error_msg.split('(')[0].strip()
+                await utils.answer(message, f"❌ Ошибка: {clean_error[:80]}")
